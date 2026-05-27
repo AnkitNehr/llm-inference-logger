@@ -1,0 +1,145 @@
+# Postgres: single replica with a PVC. ConfigMap mounts init.sql so the schema
+# is applied on first boot. For production: swap for a StatefulSet or the
+# CloudNativePG / Zalando operator + a chart-managed backup strategy.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: ollive
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: ollive
+data:
+  init.sql: |
+    -- Synced with db/init.sql at deploy time (see scripts/sync-init-sql.sh)
+    CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+    CREATE TABLE IF NOT EXISTS conversations (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title        TEXT NOT NULL DEFAULT 'New conversation',
+        status       TEXT NOT NULL DEFAULT 'active'
+                     CHECK (status IN ('active','cancelled','archived')),
+        provider     TEXT,
+        model        TEXT,
+        system_prompt TEXT,
+        metadata     JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations (updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS messages (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        role            TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+        content         TEXT NOT NULL,
+        redacted_content TEXT,
+        token_count     INTEGER,
+        inference_log_id UUID,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_messages_conv_created ON messages (conversation_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS inference_logs (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        request_id          TEXT NOT NULL UNIQUE,
+        conversation_id     UUID REFERENCES conversations(id) ON DELETE SET NULL,
+        provider            TEXT NOT NULL,
+        model               TEXT NOT NULL,
+        status              TEXT NOT NULL
+                            CHECK (status IN ('success','error','cancelled','in_progress')),
+        error_type          TEXT,
+        error_message       TEXT,
+        latency_ms          INTEGER,
+        ttft_ms             INTEGER,
+        prompt_tokens       INTEGER,
+        completion_tokens   INTEGER,
+        total_tokens        INTEGER,
+        input_preview       TEXT,
+        output_preview      TEXT,
+        streamed            BOOLEAN NOT NULL DEFAULT false,
+        started_at          TIMESTAMPTZ NOT NULL,
+        completed_at        TIMESTAMPTZ,
+        metadata            JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_inf_conv_started   ON inference_logs (conversation_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_inf_model_started  ON inference_logs (model, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_inf_status_started ON inference_logs (status, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_inf_started        ON inference_logs (started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS log_events (
+        id           BIGSERIAL PRIMARY KEY,
+        event_type   TEXT NOT NULL,
+        request_id   TEXT,
+        payload      JSONB NOT NULL,
+        received_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_log_events_received ON log_events (received_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_log_events_req      ON log_events (request_id);
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: ollive
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # PVC is RWO; never run two pods on the same data
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: ollive-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "ollive", "-d", "ollive"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "ollive", "-d", "ollive"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: init
+          configMap:
+            name: postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ollive
+spec:
+  selector: { app: postgres }
+  ports:
+    - port: 5432
+      targetPort: 5432

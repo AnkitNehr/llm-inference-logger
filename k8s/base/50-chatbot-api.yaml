@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatbot-api
+  namespace: ollive
+spec:
+  replicas: 1   # cancellation registry is in-memory; >1 needs Redis pub/sub upgrade
+  selector:
+    matchLabels: { app: chatbot-api }
+  template:
+    metadata:
+      labels: { app: chatbot-api }
+    spec:
+      containers:
+        - name: chatbot-api
+          image: ollive/chatbot-api:dev
+          imagePullPolicy: IfNotPresent
+          command: ["uvicorn", "chatbot_api.main:app", "--host", "0.0.0.0", "--port", "8001"]
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - configMapRef: { name: ollive-config }
+            - secretRef:    { name: ollive-secrets }
+          readinessProbe:
+            httpGet: { path: /health, port: 8001 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8001 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 1, memory: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatbot-api
+  namespace: ollive
+spec:
+  type: NodePort
+  selector: { app: chatbot-api }
+  ports:
+    - port: 8001
+      targetPort: 8001
+      nodePort: 30001

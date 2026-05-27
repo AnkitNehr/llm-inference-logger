@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollive-config
+  namespace: ollive
+data:
+  REDIS_URL: "redis://redis:6379/0"
+  LOG_STREAM: "inference_logs"
+  INGESTION_URL: "http://ingestion-api:8002"
+  DEFAULT_PROVIDER: "gemini"
+  DEFAULT_MODEL: "gemini-2.5-flash"
+  CONTEXT_WINDOW_TURNS: "10"
+  STORE_RAW_CONTENT: "true"
+  PII_REDACT: "true"
+  # NOTE: DATABASE_URL is built from secret values below; not stored here.
+---
+# Secrets — replace base64 values before applying, OR use `kubectl create secret`
+# (see k8s/README.md). Empty string keys (b64 "") engage the SDK's mock-provider fallback.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ollive-secrets
+  namespace: ollive
+type: Opaque
+stringData:
+  POSTGRES_USER: "ollive"
+  POSTGRES_PASSWORD: "ollive"
+  POSTGRES_DB: "ollive"
+  DATABASE_URL: "postgresql+asyncpg://ollive:ollive@postgres:5432/ollive"
+  OPENAI_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  GEMINI_API_KEY: ""

@@ -1,0 +1,63 @@
+# Frontend uses Vite dev server. VITE_* env vars are read at startup and
+# baked into the served JS, so they must point to URLs the *browser* can reach.
+# For kind/minikube/k3s we expose all three services via NodePort and configure
+# the frontend to call http://localhost:30001 and :30002.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: ollive
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: frontend }
+  template:
+    metadata:
+      labels: { app: frontend }
+    spec:
+      containers:
+        - name: frontend
+          image: ollive/frontend:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5173
+          env:
+            - name: VITE_CHATBOT_URL
+              value: "http://localhost:30001"
+            - name: VITE_INGESTION_URL
+              value: "http://localhost:30002"
+          readinessProbe:
+            tcpSocket: { port: 5173 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: ollive
+spec:
+  type: NodePort
+  selector: { app: frontend }
+  ports:
+    - port: 5173
+      targetPort: 5173
+      nodePort: 30173
+---
+# Also expose ingestion-api over NodePort so the browser-side dashboard
+# can hit it directly. (Inside the cluster, services already talk via DNS.)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingestion-api-external
+  namespace: ollive
+spec:
+  type: NodePort
+  selector: { app: ingestion-api }
+  ports:
+    - port: 8002
+      targetPort: 8002
+      nodePort: 30002

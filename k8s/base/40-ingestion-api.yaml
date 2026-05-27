@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-api
+  namespace: ollive
+spec:
+  replicas: 2  # stateless — scale freely
+  selector:
+    matchLabels: { app: ingestion-api }
+  template:
+    metadata:
+      labels: { app: ingestion-api }
+    spec:
+      containers:
+        - name: ingestion-api
+          image: ollive/ingestion-api:dev
+          imagePullPolicy: IfNotPresent  # let local images load (kind/minikube)
+          command: ["uvicorn", "ingestion_api.main:app", "--host", "0.0.0.0", "--port", "8002"]
+          ports:
+            - containerPort: 8002
+          envFrom:
+            - configMapRef: { name: ollive-config }
+            - secretRef:    { name: ollive-secrets }
+          readinessProbe:
+            httpGet: { path: /health, port: 8002 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8002 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingestion-api
+  namespace: ollive
+spec:
+  selector: { app: ingestion-api }
+  ports:
+    - port: 8002
+      targetPort: 8002

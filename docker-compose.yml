@@ -1,0 +1,121 @@
+name: ollive-assessment
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ollive}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ollive}
+      POSTGRES_DB: ${POSTGRES_DB:-ollive}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ollive} -d ${POSTGRES_DB:-ollive}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  ingestion-api:
+    build:
+      context: .
+      dockerfile: ingestion_api/Dockerfile
+    command: ["uvicorn", "ingestion_api.main:app", "--host", "0.0.0.0", "--port", "8002", "--reload"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ollive}:${POSTGRES_PASSWORD:-ollive}@postgres:5432/${POSTGRES_DB:-ollive}
+      REDIS_URL: redis://redis:6379/0
+      LOG_STREAM: ${LOG_STREAM:-inference_logs}
+      PII_REDACT: ${PII_REDACT:-true}
+    volumes:
+      - ./ingestion_api:/app/ingestion_api
+      - ./sdk/llm_sdk:/app/llm_sdk
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ingestion-consumer:
+    build:
+      context: .
+      dockerfile: ingestion_api/Dockerfile
+    command: ["python", "-m", "ingestion_api.consumer"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ollive}:${POSTGRES_PASSWORD:-ollive}@postgres:5432/${POSTGRES_DB:-ollive}
+      REDIS_URL: redis://redis:6379/0
+      LOG_STREAM: ${LOG_STREAM:-inference_logs}
+      PII_REDACT: ${PII_REDACT:-true}
+    volumes:
+      - ./ingestion_api:/app/ingestion_api
+      - ./sdk/llm_sdk:/app/llm_sdk
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  chatbot-api:
+    build:
+      context: .
+      dockerfile: chatbot_api/Dockerfile
+    command: ["uvicorn", "chatbot_api.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ollive}:${POSTGRES_PASSWORD:-ollive}@postgres:5432/${POSTGRES_DB:-ollive}
+      INGESTION_URL: http://ingestion-api:8002
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-openai}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-4o-mini}
+      CONTEXT_WINDOW_TURNS: ${CONTEXT_WINDOW_TURNS:-10}
+      PII_REDACT: ${PII_REDACT:-true}
+      STORE_RAW_CONTENT: ${STORE_RAW_CONTENT:-true}
+    volumes:
+      - ./chatbot_api:/app/chatbot_api
+      - ./sdk/llm_sdk:/app/llm_sdk
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres: { condition: service_healthy }
+      ingestion-api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_CHATBOT_URL: http://localhost:8001
+      VITE_INGESTION_URL: http://localhost:8002
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+    depends_on:
+      chatbot-api: { condition: service_healthy }
+
+volumes:
+  pgdata:

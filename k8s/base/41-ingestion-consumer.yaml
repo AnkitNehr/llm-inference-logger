@@ -1,0 +1,31 @@
+# Consumer worker — separate Deployment so we can scale it independently
+# (Redis Streams consumer group partitions work automatically across replicas).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-consumer
+  namespace: ollive
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: ingestion-consumer }
+  template:
+    metadata:
+      labels: { app: ingestion-consumer }
+    spec:
+      containers:
+        - name: consumer
+          image: ollive/ingestion-api:dev   # same image, different entrypoint
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "ingestion_api.consumer"]
+          env:
+            - name: CONSUMER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name  # unique per pod for consumer-group naming
+          envFrom:
+            - configMapRef: { name: ollive-config }
+            - secretRef:    { name: ollive-secrets }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
